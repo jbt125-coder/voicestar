@@ -129,7 +129,10 @@ select{flex:1;min-width:120px;padding:9px;border-radius:6px;border:1px solid #33
   <h2>Input and output</h2>
   <div class="selrow"><select id="inSel"><option value="">Default microphone</option></select></div>
   <div class="selrow" id="outRow" style="display:none"><select id="outSel"></select></div>
-  <p id="outHelp">To send audio to a Bluetooth speaker, headphones or amp: connect it in iPhone Settings, then pick it from the AirPlay/output icon in Control Center. Bluetooth adds roughly 100-250 ms of delay; wired headphones or a USB audio interface are much tighter.</p>
+  <div class="selrow" id="routeRow" style="display:none"><select id="routeSel"><option value="media">Loudspeaker / AirPlay (recommended)</option><option value="direct">Direct (lowest latency, may use earpiece)</option></select></div>
+  <div class="btns" id="airRow" style="display:none"><button class="tb" id="bAir"><i class="led"></i>AirPlay to TV / speaker</button></div>
+  <audio id="outEl" playsinline webkit-playsinline x-webkit-airplay="allow" style="display:none"></audio>
+  <p id="outHelp">On iPhone, "Loudspeaker / AirPlay" sends the voice to the main bottom speaker instead of the quiet earpiece. To use an Apple TV, start the microphone first, then tap "AirPlay to TV / speaker" (or pick the Apple TV from the AirPlay icon in Control Center). AirPlay adds about 1-2 seconds of delay, so you will hear yourself late; for live use on a TV, a Lightning/USB-C to HDMI adapter is near-instant. Bluetooth adds roughly 100-250 ms; wired headphones or a USB audio interface are much tighter.</p>
  </div>
 
  <div class="panel">
@@ -244,7 +247,9 @@ var SCALES={'Major':[0,2,4,5,7,9,11],'Minor':[0,2,3,5,7,8,10],'Chromatic':[0,1,2
 var KEYS=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 
 var S={},cur='original',knobs={},muted=false,bypass=false,running=false;
-var ctx=null,stream=null,src=null,node=null,dspFB=null,engine='',graph=false,rep=null;
+var ctx=null,stream=null,src=null,node=null,dspFB=null,engine='',graph=false,rep=null,mDest=null;
+var IOS=/iP(hone|ad|od)/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+var route=IOS?'media':'direct';
 var inG,hp,low,warm,res,twg,high,shaper,combIn,dly,fb,combWet,wetG,dryG,sum,master,lim,anIn,anOut,lastDist=-1;
 
 function $(id){return document.getElementById(id);}
@@ -387,9 +392,31 @@ function buildGraph(){
   inG.connect(anIn);inG.connect(node);inG.connect(dryG);
   node.connect(hp);hp.connect(low);low.connect(warm);warm.connect(res);res.connect(twg);twg.connect(high);high.connect(shaper);shaper.connect(combIn);
   combIn.connect(wetG);combIn.connect(dly);dly.connect(fb);fb.connect(dly);dly.connect(combWet);combWet.connect(wetG);
-  wetG.connect(sum);dryG.connect(sum);sum.connect(master);master.connect(lim);lim.connect(anOut);anOut.connect(ctx.destination);
-  graph=true;
+  wetG.connect(sum);dryG.connect(sum);sum.connect(master);master.connect(lim);lim.connect(anOut);
+  if(ctx.createMediaStreamDestination){try{mDest=ctx.createMediaStreamDestination();}catch(e){mDest=null;}}
+  graph=true;setRoute();
  });
+}
+/* Output routing. On iOS, Web Audio sent straight to ctx.destination while the mic is open
+   is treated like a phone call and played through the earpiece, and it cannot be AirPlayed.
+   Playing the processed signal through a media element instead uses the loudspeaker and
+   lets the element be AirPlayed to an Apple TV. */
+function setRoute(){
+ if(!graph)return;
+ var el=$('outEl'),useMedia=route==='media'&&mDest;
+ try{anOut.disconnect();}catch(e){}
+ if(useMedia){
+  anOut.connect(mDest);
+  if(el.srcObject!==mDest.stream)el.srcObject=mDest.stream;
+  playOut();
+ }else{
+  anOut.connect(ctx.destination);
+  try{el.pause();}catch(e){}
+ }
+}
+function playOut(){
+ var el=$('outEl');if(route!=='media'||!mDest)return;
+ var p=el.play();if(p&&p['catch'])p['catch'](function(){toast('Tap Start again to enable the speaker');});
 }
 function getMic(){
  var a={echoCancellation:false,noiseSuppression:false,autoGainControl:false},id=$('inSel').value;
@@ -400,7 +427,7 @@ function connectMic(){if(src){try{src.disconnect();}catch(e){}}src=ctx.createMed
 function stopMic(){if(stream){stream.getTracks().forEach(function(t){t.stop();});}stream=null;if(src){try{src.disconnect();}catch(e){}src=null;}}
 function startAll(){
  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){setStatus('Microphone access needs Safari and an https page (GitHub Pages works).',1);return;}
- try{if(navigator.audioSession)navigator.audioSession.type='play-and-record';}catch(e){}
+ try{if(navigator.audioSession)navigator.audioSession.type='auto';}catch(e){}
  if(ctx)ctx.resume();
  setStatus('Requesting microphone...');
  getMic().then(function(s){
@@ -410,7 +437,7 @@ function startAll(){
   ctx.resume();
   return graph?null:buildGraph();
  }).then(function(){
-  connectMic();running=true;apply();
+  connectMic();running=true;apply();playOut();
   $('power').textContent='Stop microphone';$('power').className='live';
   setStatus('Live. Engine: '+engine+' at '+ctx.sampleRate+' Hz.');
   listDevices();
@@ -435,7 +462,22 @@ $('outSel').onchange=function(){if(ctx&&ctx.setSinkId)ctx.setSinkId(this.value)[
 $('power').onclick=function(){if(running)stopAll();else startAll();};
 $('bMute').onclick=function(){muted=!muted;this.className='tb red'+(muted?' on':'');apply();};
 $('bByp').onclick=function(){bypass=!bypass;this.className='tb'+(bypass?' on':'');apply();};
-document.addEventListener('visibilitychange',function(){if(!document.hidden&&running&&ctx&&ctx.state!=='running')ctx.resume();});
+document.addEventListener('visibilitychange',function(){if(!document.hidden&&running){if(ctx&&ctx.state!=='running')ctx.resume();playOut();}});
+$('routeSel').value=route;$('routeRow').style.display=IOS?'flex':'none';
+$('routeSel').onchange=function(){route=this.value;setRoute();toast(route==='media'?'Output: loudspeaker / AirPlay':'Output: direct');};
+(function(){
+ var el=$('outEl');if(!el.webkitShowPlaybackTargetPicker)return;
+ $('airRow').style.display='flex';
+ el.addEventListener('webkitcurrentplaybacktargetiswirelesschanged',function(){
+  var w=el.webkitCurrentPlaybackTargetIsWireless;$('bAir').className='tb'+(w?' on':'');
+  toast(w?'Playing on AirPlay. Expect 1-2 s of delay.':'AirPlay off. Playing on iPhone.');
+ });
+ $('bAir').onclick=function(){
+  if(!running){toast('Start the microphone first, then choose AirPlay.');return;}
+  if(route!=='media'){route='media';$('routeSel').value='media';setRoute();}
+  playOut();try{el.webkitShowPlaybackTargetPicker();}catch(e){toast('AirPlay is not available here. Use Control Center instead.');}
+ };
+})();
 
 /* ---------- meters ---------- */
 var bufI=new Float32Array(1024),bufO=new Float32Array(1024),lvI=0,lvO=0,pkI=0,pkO=0,pkIt=0,pkOt=0,clipUntil=0,hot=0;
